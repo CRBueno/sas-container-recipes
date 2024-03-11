@@ -155,21 +155,46 @@ fi
 # Clean up some other CAS configuration for a Docker image
 #
 
-[[ -z ${CASKEY+x} ]]       && CASKEY="REPLACE ME with unique text. This is used to allow CAS workers to talk to the CAS controller"
+if [[ ${CASCFG_MODE} = "smp" ]]; then
+    unset CASKEY
+else
+    [[ -z ${CASKEY+x} ]] && CASKEY="REPLACE ME with unique text. This is used to allow CAS workers to talk to the CAS controller"
+fi
+
 [[ -z ${SERVICE_NAME+x} ]] && export SERVICE_NAME="cascontroller"
 is_controller=true
 
 if [ "${SERVICE_NAME}" = "cascontroller" ]; then
     export CASCONTROLLERHOST="${SAS_CURRENT_HOST}"
     export CASWORKERHOSTS=""
-    # Update the controller host before updating Consul
-    sed -i "s|REPLACE_KEY_WITH_RUN_TIME_VALUE|${CASKEY}|" ${SAS_CAS_CONFIG}/etc/cas/${SASCASINSTANCE}/cas.yml
+	sed -i "/environment/a\        CAS_CONSUL_TOKEN: '${SAS_CAS_CONFIG}/etc/SASSecurityCertificateFramework/tokens/cas'" ${SAS_CAS_CONFIG}/etc/cas/default/cas.yml
     sed -i "s|SASCONTROLLERHOST: .*|SASCONTROLLERHOST: ${CASCONTROLLERHOST}|" ${SAS_CAS_CONFIG}/etc/cas/${SASCASINSTANCE}/cas.yml
-    echo "[INFO]  : Load the cas.yml file into consul"
-    ${SASHOME}/bin/sas-bootstrap-config kv bulkload \
-        --force \
-        --site-default \
-        --yaml ${SAS_CAS_CONFIG}/etc/cas/${SASCASINSTANCE}/cas.yml
+
+    if [ "${CASCFG_MODE}" = "mpp" ]; then
+        echo_line "[INFO]  - Updating CAS to support elastic configuration"
+        sed -i "s|        #CASKEY:.*|        CASKEY: '${CASKEY}'|" ${SAS_CAS_CONFIG}/etc/cas/default/cas.yml
+        sed -i "s|        CASKEY:.*|        CASKEY: '${CASKEY}'|" ${SAS_CAS_CONFIG}/etc/cas/default/cas.yml
+        sed -i "s|        #keyfile:.*|        keyfile: '${CASCFG_KEYFILE}'|" ${SAS_CAS_CONFIG}/etc/cas/default/cas.yml
+        sed -i "s|        keyfile:.*|        keyfile: '${CASCFG_KEYFILE}'|" ${SAS_CAS_CONFIG}/etc/cas/default/cas.yml
+        sed -i "s|        #elastic:.*|        elastic: '${CASCFG_ELASTIC}'|" ${SAS_CAS_CONFIG}/etc/cas/default/cas.yml
+        sed -i "s|        elastic:.*|        elastic: '${CASCFG_ELASTIC}'|" ${SAS_CAS_CONFIG}/etc/cas/default/cas.yml
+    else
+        sed -i 's|        CASKEY:.*$|        #CASKEY:|' /opt/sas/viya/config/etc/cas/default/cas.yml;
+        sed -i 's|        keyfile:.*$|        #keyfile:|' /opt/sas/viya/config/etc/cas/default/cas.yml;
+        sed -i 's|        elastic:.*$|        #elastic:|' /opt/sas/viya/config/etc/cas/default/cas.yml;
+        sed -i 's|^CASKEY=.*$|#CASKEY=|' /opt/sas/viya/config/etc/sysconfig/cas/default/sas-cas-deployment;
+        sed -i 's|cas.keyfile|--cas.keyfile|' /opt/sas/viya/config/etc/cas/default/casconfig_deployment.lua;
+        sed -i 's|cas.elastic|--cas.elastic|' /opt/sas/viya/config/etc/cas/default/casconfig_deployment.lua;
+    fi
+
+    if [[ -n ${CONSUL_TOKENS_CLIENT} ]]; then
+        echo "[INFO]  : Load the cas.yml file into consul"
+        ${SASHOME}/bin/sas-bootstrap-config kv bulkload \
+            --force \
+            --site-default \
+            --yaml ${SAS_CAS_CONFIG}/etc/cas/${SASCASINSTANCE}/cas.yml
+fi
+
 elif [ "${SERVICE_NAME}" = "cassecondary" ]; then
     export CASBACKUPHOST="${SAS_CURRENT_HOST}"
     export CASCFG_MODE=mpp
@@ -177,7 +202,23 @@ elif [ "${SERVICE_NAME}" = "casworker" ]; then
     is_controller=false
     # Lookup in Consul for the kv pair....if it is not there, wait until it shows up. Look for the SASCONTROLLERHOST
     # The following would need to take into consideration, the tenant (shared).
-    ${SASHOME}/bin/sas-bootstrap-config catalog serviceurl cas-shared-${SASCASINSTANCE}
+    set +e
+    exit_loop=false
+    source ${SASCONFIG}/consul.conf
+    while ! $exit_loop; do
+        cas_url=$(${SASHOME}/bin/sas-bootstrap-config \
+            --token-file ${SASCONFIG}/etc/SASSecurityCertificateFramework/tokens/consul/default/client.token \
+            catalog serviceurl --wait cas-shared-${SASCASINSTANCE})
+
+        if [[ "${cas_url}" != "" ]]; then
+            echo "The cas-shared-${SASCASINSTANCE} url is '${cas_url}'"
+            exit_loop=true;
+        else
+            echo "Waiting on the cas-shared-${SASCASINSTANCE} service..."
+            sleep 5
+        fi
+    done
+    set -e
     export CASWORKERHOSTS="${SAS_CURRENT_HOST}"
     export CASCFG_MODE=mpp
 else
@@ -218,7 +259,7 @@ if [ "${CASCFG_MODE}" = "mpp" ]; then
     [[ -z ${CASCFG_COLOCATION+x} ]]     && export CASCFG_COLOCATION=none
 fi
 
-# Forcing this so it will get sourced into supporting scripts. Was having issues 
+# Forcing this so it will get sourced into supporting scripts. Was having issues
 # when registering the services. They would register as localhost instead of the
 # defined host name.
 echo "SAS_CURRENT_HOST=${SAS_CURRENT_HOST}" >> ${SAS_CAS_CONFIG}/etc/sysconfig/cas/${SASCASINSTANCE}/sas-cas-docker
@@ -578,21 +619,25 @@ fi
 # Run CAS
 ###############################################################################
 
-# Start and continually check the ops-agent process.
-${SASHOME}/lib/envesntl/docker-ops-agent &
-
+set +e
 exit_loop=false
 source ${SASCONFIG}/consul.conf
-while ! $exit_loop; do 
+while ! $exit_loop; do
     httpd_url=$(${SASHOME}/bin/sas-bootstrap-config \
     --token-file ${SASCONFIG}/etc/SASSecurityCertificateFramework/tokens/consul/default/client.token catalog serviceurl httpd)
-    
-     if [[ "${httpd_url}" != "" ]]; then 
-        exit_loop=true; 
-    else 
+
+     if [[ "${httpd_url}" != "" ]]; then
+        echo "The httpd url is '${httpd_url}'"
+        exit_loop=true;
+    else
+        echo "Waiting on the httpd service..."
         sleep 5
     fi
 done
+set -e
+
+# Start and continually check the ops-agent process.
+${SASHOME}/lib/envesntl/docker-ops-agent &
 
 echo "Starting Cloud Analytic Services..."
 mkdir -pv -m 2770 /var/log/sas/viya/cas/default_audit

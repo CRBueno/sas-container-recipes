@@ -77,7 +77,7 @@ cat $HOME/.docker/config.json
 
 You can use addons to include extra components in your SAS Viya images. There are addons for authentication, data sources, and integrated development environments (IDE). Only the addons that require pre-build tasks are listed in this section. You can find the addons in sas-container-recipes/addons directory.
 
-For more information, see [Addons](https://github.com/sassoftware/sas-container-recipes/wiki/Appendix:-Under-the-Hood#addons).
+For more information, see [Addons](https://github.com/sassoftware/sas-container-recipes/wiki/Appendix-Under-the-Hood#addons).
 
 ### Host Authentication
 
@@ -213,7 +213,7 @@ Find the example_ingress.yml file for the single container. Then, copy and edit 
 
 ```
 mkdir ${PWD}/run
-cp samples/single-container/example_ingress.yml ${PWD}/run/programming_ingress.yml
+cp samples/viya-single-container/example_ingress.yml ${PWD}/run/programming_ingress.yml
 vi ${PWD}/run/programming_ingress.yml
 ```
 
